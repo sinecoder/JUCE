@@ -249,6 +249,25 @@ namespace util
 
  #include "containers/juce_SIMDRegister.h"
  #include "containers/juce_SIMDRegister_Impl.h"
+
+ // SineDAW-local patch: on LP64 platforms (macOS, Linux) `unsigned long` is
+ // distinct from `unsigned long long` (== uint64_t), so size_t is its own
+ // C++ type. JUCE only specializes SIMDNativeOps for the fixed-width integer
+ // typedefs, which means any TU that incidentally instantiates
+ // SIMDRegister<size_t> (e.g. via a template probe) trips
+ // "Implicit instantiation of undefined template SIMDNativeOps<unsigned long>".
+ // Windows is LLP64 where size_t == unsigned long long, so it is unaffected;
+ // gate the alias on !JUCE_WINDOWS to keep the Windows build byte-identical.
+ #if ! JUCE_WINDOWS
+  #include <type_traits>
+  namespace juce::dsp
+  {
+      template <>
+      struct SIMDNativeOps<unsigned long>
+          : SIMDNativeOps<std::conditional_t<sizeof (unsigned long) == sizeof (uint64_t),
+                                             uint64_t, uint32_t>> {};
+  }
+ #endif
 #endif
 
 #include "maths/juce_SpecialFunctions.h"
