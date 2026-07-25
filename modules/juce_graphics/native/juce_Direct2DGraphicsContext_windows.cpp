@@ -1804,6 +1804,15 @@ void Direct2DGraphicsContext::drawGlyphs (Span<const uint16_t> glyphNumbers,
         return true;
     };
 
+    // [SineDAW patch - text crispness experiment B] Force ClearType subpixel
+    // antialiasing for glyph runs. JUCE never calls SetTextAntialiasMode, so the
+    // context uses D2D1_TEXT_ANTIALIAS_MODE_DEFAULT, which resolves to GRAYSCALE
+    // on premultiplied-alpha targets (JUCE's compositing surfaces) - visibly
+    // softer than native/Chromium apps (ClearType) at small UI sizes. CLEARTYPE
+    // sharpens text on opaque areas; it can colour-fringe over transparent ones.
+    // Delete this line to restore stock JUCE behaviour.
+    deviceContext->SetTextAntialiasMode (D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+
     if (! tryDrawColourGlyphs())
         deviceContext->DrawGlyphRun (baselineOrigin, &directWriteGlyphRun, brush);
 
