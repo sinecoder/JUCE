@@ -2873,6 +2873,16 @@ public:
         }
     }
 
+    /** SineDAW: public route to resetParameters() for plugins that change
+        state without announcing kParamValuesChanged - see the base class. */
+    void resyncParameterValuesFromPlugin() override
+    {
+        JUCE_ASSERT_MESSAGE_THREAD
+
+        if (editController != nullptr)
+            resetParameters();
+    }
+
     MemoryBlock getPreset() const override
     {
         VSTComSmartPtr memoryStream { new MemoryStream(), IncrementRef::no };
