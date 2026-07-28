@@ -85,6 +85,22 @@ public:
     */
     virtual void getExtensions (ExtensionsVisitor&) const;
 
+    /** SineDAW: pulls the current value of every parameter from the plugin
+        itself into whatever the format's getValue() reads.
+
+        VST3 hosting answers AudioProcessorParameter::getValue() from a cache
+        that is only refreshed when the plugin announces a bulk change via
+        restartComponent (kParamValuesChanged) - and plenty of plugins load
+        presets from their own browser without announcing anything (Vital,
+        for one). After that, every cached value is stale even though the
+        edit controller knows the truth. This hook lets a host force the
+        pull before reading values it needs to be honest - capturing a morph
+        state, saving a preset.
+
+        The default is a no-op: VST2 reads the effect directly, so only
+        formats that cache need to override. Message thread only. */
+    virtual void resyncParameterValuesFromPlugin() {}
+
     using HostedParameter = HostedAudioProcessorParameter;
 
     /** Adds a parameter to this instance.
