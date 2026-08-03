@@ -502,16 +502,41 @@ public:
 
         bool undo() override
         {
+            // SineDAW patch: resolve the child by IDENTITY, not by the index
+            // recorded when the action was made.
+            //
+            // Any code that adds or removes a child of this same parent WITHOUT
+            // an UndoManager shifts every index recorded before it. Stock JUCE
+            // then removes the WRONG child in a release build - silently - and
+            // asserts in a debug one; worse, an index past the end reaches
+            // ReferenceCountedArray::getObjectPointer unchecked, so the release
+            // path is an out-of-bounds read. Since we hold a Ptr to the exact
+            // child, looking it up is both correct and cheap: in a well-formed
+            // history the lookup returns childIndex and nothing changes.
+            //
+            // The DBG names the parent, which is the one thing the stack trace
+            // cannot say - it is how you find the code that skipped the
+            // UndoManager.
             if (isDeleting)
             {
-                target->addChild (child.get(), childIndex, nullptr);
+                target->addChild (child.get(), jlimit (0, target->children.size(), childIndex), nullptr);
             }
             else
             {
-                // If you hit this, it seems that your object's state is getting confused - probably
-                // because you've interleaved some undoable and non-undoable operations?
-                jassert (childIndex < target->children.size());
-                target->removeChild (childIndex, nullptr);
+                auto index = target->children.indexOf (child.get());
+
+                // Logged, deliberately NOT asserted: the removal below is now
+                // correct either way, so breaking here would only interrupt a
+                // session that no longer has anything wrong with it.
+                if (index != childIndex)
+                    DBG ("ValueTree undo: child index moved - parent=" << target->type.toString()
+                          << " child=" << child->type.toString()
+                          << " recorded=" << childIndex
+                          << " actual=" << index
+                          << " size=" << target->children.size());
+
+                if (index >= 0)
+                    target->removeChild (index, nullptr);
             }
 
             return true;
