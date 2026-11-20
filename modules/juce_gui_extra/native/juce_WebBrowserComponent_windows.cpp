@@ -729,6 +729,48 @@ private:
     }
 
     //==============================================================================
+    // SineDAW patch: files a page hands over with
+    // chrome.webview.postMessageWithAdditionalObjects (a drop: a web page never
+    // sees a dropped file's path) reach the host with their paths, as the
+    // event's payload's "sdFiles" array. Other additional objects are ignored.
+    static void addHandedFiles (ICoreWebView2WebMessageReceivedEventArgs* args, var& message)
+    {
+        ComSmartPtr<ICoreWebView2WebMessageReceivedEventArgs2> args2;
+
+        if (args == nullptr || FAILED (args->QueryInterface (args2.resetAndGetPointerAddress())) || args2 == nullptr)
+            return;
+
+        ComSmartPtr<ICoreWebView2ObjectCollectionView> objects;
+
+        if (FAILED (args2->get_AdditionalObjects (objects.resetAndGetPointerAddress())) || objects == nullptr)
+            return;
+
+        UINT32 count = 0;
+        objects->get_Count (&count);
+        Array<var> paths;
+
+        for (UINT32 i = 0; i < count; ++i)
+        {
+            ComSmartPtr<IUnknown> item;
+
+            if (FAILED (objects->GetValueAtIndex (i, item.resetAndGetPointerAddress())) || item == nullptr)
+                continue;
+
+            ComSmartPtr<ICoreWebView2File> file;
+
+            if (FAILED (item->QueryInterface (file.resetAndGetPointerAddress())) || file == nullptr)
+                continue;
+
+            if (const auto path = callMethodWithLpwstrResult (file.get(), &ICoreWebView2File::get_Path))
+                paths.add (*path);
+        }
+
+        if (! paths.isEmpty())
+            if (auto* payload = message["payload"].getDynamicObject())
+                payload->setProperty ("sdFiles", paths);
+    }
+
+    //==============================================================================
     template <typename ArgType>
     static std::optional<String> callMethodWithLpwstrResult (ArgType* args, HRESULT (__stdcall ArgType::* method) (LPWSTR*))
     {
@@ -918,7 +960,11 @@ private:
                                                  [this] (ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT
                                                  {
                                                      if (const auto str = callMethodWithLpwstrResult (args, &ICoreWebView2WebMessageReceivedEventArgs::TryGetWebMessageAsString))
-                                                         owner.impl->handleNativeEvent (JSON::fromString (*str));
+                                                     {
+                                                         auto message = JSON::fromString (*str);
+                                                         addHandedFiles (args, message);
+                                                         owner.impl->handleNativeEvent (message);
+                                                     }
 
                                                      return S_OK;
                                                  }).Get(), &webMessageReceivedToken);
