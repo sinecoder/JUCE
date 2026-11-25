@@ -1072,6 +1072,12 @@ private:
             settings->put_IsStatusBarEnabled (! preferences.getWinWebView2BackendOptions().getIsStatusBarDisabled());
             settings->put_IsBuiltInErrorPageEnabled (! preferences.getWinWebView2BackendOptions().getIsBuiltInErrorPageDisabled());
 
+            // SineDAW: a page never zooms as a browser page does - Ctrl+wheel, Ctrl with plus or minus, a touchpad's pinch.
+            // The wheel still reaches the page, whose own views (the arrangement, the editors) zoom with it.
+            settings->put_IsZoomControlEnabled (FALSE);
+            // And at 100 %: a zoom made before (or kept for the page's origin) cannot be undone with Ctrl+0 any more.
+            webViewController->put_ZoomFactor (1.0);
+
             if (userAgent.isNotEmpty())
             {
                 ComSmartPtr<ICoreWebView2Settings2> settings2;
