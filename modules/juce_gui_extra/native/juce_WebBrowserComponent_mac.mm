@@ -176,6 +176,20 @@ static const char* lastFocusChangeMemberName = "lastFocusChangeHandle";
     return getIvar<LastFocusChange*> (instance, lastFocusChangeMemberName);
 }
 
+// SineDAW patch (R6b): the paths of the files last dropped on a WKWebView (a StringArray its
+// WKWebViewImpl owns), which a page hands over with window.__JUCE__.postMessageWithFiles.
+static const char* dropPathsMemberName = "sdDropPathsHandle";
+
+[[maybe_unused]] static void setDropPathsHandle (id instance, StringArray* object)
+{
+    object_setInstanceVariable (instance, dropPathsMemberName, object);
+}
+
+[[maybe_unused]] static StringArray* getDropPathsHandle (id instance)
+{
+    return getIvar<StringArray*> (instance, dropPathsMemberName);
+}
+
 #if JUCE_MAC
 template <class WebViewClass>
 struct WebViewKeyEquivalentResponder final : public ObjCClass<WebViewClass>
@@ -265,6 +279,54 @@ struct WebViewKeyEquivalentResponder final : public ObjCClass<WebViewClass>
 
         if (acceptsFirstMouse)
             this->addMethod (@selector (acceptsFirstMouse:), [] (id, SEL, NSEvent*) { return YES; });
+
+        // SineDAW patch (R6b): a WKWebView keeps the paths of the files dropped on it (a page never
+        // sees them) for the page's window.__JUCE__.postMessageWithFiles (see WebViewDelegateClass).
+        // WebKit's performDragOperation: reads the pasteboard and hands the drop to the web process
+        // asynchronously, so the paths stored before calling super are there before the page's
+        // message comes back. Super still runs, so the page gets its DOM drop.
+        if constexpr (std::is_same_v<WebViewClass, WKWebView>)
+        {
+            this->template addIvar<StringArray*> (dropPathsMemberName);
+
+            this->addMethod (@selector (draggingEntered:),
+                             [] (id self, SEL selector, id<NSDraggingInfo> info) -> NSDragOperation
+                             {
+                                 if (auto* paths = getDropPathsHandle (self))
+                                     paths->clear();
+
+                                 return Base::template sendSuperclassMessage<NSDragOperation> (self, selector, info);
+                             });
+
+            this->addMethod (@selector (performDragOperation:),
+                             [] (id self, SEL selector, id<NSDraggingInfo> info) -> BOOL
+                             {
+                                 if (auto* paths = getDropPathsHandle (self))
+                                 {
+                                     paths->clear();
+
+                                     NSArray* urls = [[info draggingPasteboard] readObjectsForClasses: @[[NSURL class]]
+                                                                                              options: @{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }];
+
+                                     for (NSURL* url in urls)
+                                     {
+                                         // filePathURL turns Finder's file reference URLs (/.file/id=...) into path URLs
+                                         NSURL* fileUrl = [url filePathURL];
+
+                                         if (fileUrl == nil)
+                                             fileUrl = url;
+
+                                         if (! [fileUrl isFileURL])
+                                             continue;
+
+                                         if (NSString* path = [fileUrl path]; path != nil)
+                                             paths->add (nsStringToJuce (path));
+                                     }
+                                 }
+
+                                 return Base::template sendSuperclassMessage<BOOL> (self, selector, info);
+                             });
+        }
 
         this->registerClass();
     }
@@ -483,6 +545,15 @@ struct WebViewDelegateClass final : public ObjCClass<NSObject>
                    {
                        if (auto* connector = getConnector (self))
                        {
+                          #if JUCE_MAC
+                           // SineDAW patch (R6b): files a page hands over with window.__JUCE__.postMessageWithFiles
+                           if ([[static_cast<WKScriptMessage*> (message) name] isEqualToString: @"__JUCE_FILES__"])
+                           {
+                               handleFilesMessage (*connector, static_cast<WKScriptMessage*> (message));
+                               return;
+                           }
+                          #endif
+
                            const auto object = fromObject ([message body]);
 
                            if (! object.isString())
@@ -653,6 +724,70 @@ struct WebViewDelegateClass final : public ObjCClass<NSObject>
     }
 
 private:
+   #if JUCE_MAC
+    // SineDAW patch (R6b): window.__JUCE__.postMessageWithFiles (message, files) posts
+    // { message, names } to __JUCE_FILES__, message being the JSON an emitted event posts
+    // ({ eventId, payload }). Each name takes the first unused path, among those the WKWebView
+    // kept from its last drop, whose file name equals it (both precomposed: Finder may hand
+    // decomposed names), and the matched paths become the payload's "sdFiles" array, as
+    // addHandedFiles makes it on Windows; then the event takes the usual route. A drop that left
+    // no paths (a file promise from Mail or Photos) sends an empty sdFiles. A drop is handed
+    // over once.
+    static void handleFilesMessage (DelegateConnector& connector, WKScriptMessage* message)
+    {
+        const auto body = fromObject ([message body]);
+
+        if (! body.isString())
+        {
+            jassertfalse;
+            return;
+        }
+
+        const auto wrapper = JSON::fromString (body.toString());
+        auto event = wrapper["message"];
+
+        if (event.isString())
+            event = JSON::fromString (event.toString());
+
+        const auto precomposed = [] (const String& s)
+        {
+            return nsStringToJuce ([juceStringToNS (s) precomposedStringWithCanonicalMapping]);
+        };
+
+        Array<var> paths;
+
+        if (auto* stored = getDropPathsHandle ([message webView]))
+        {
+            StringArray candidates (*stored), candidateNames;
+
+            for (const auto& path : candidates)
+                candidateNames.add (precomposed (path.fromLastOccurrenceOf ("/", false, false)));
+
+            if (const auto* names = wrapper["names"].getArray())
+            {
+                for (const auto& name : *names)
+                {
+                    const auto index = candidateNames.indexOf (precomposed (name.toString()));
+
+                    if (index < 0)
+                        continue;
+
+                    paths.add (var (candidates[index]));
+                    candidates.remove (index);
+                    candidateNames.remove (index);
+                }
+            }
+
+            stored->clear();
+        }
+
+        if (auto* payload = event["payload"].getDynamicObject())
+            payload->setProperty ("sdFiles", paths);
+
+        connector.handleNativeEvent (event);
+    }
+   #endif
+
     static void displayError (WebBrowserComponent* owner, NSError* error)
     {
         if ([error code] != NSURLErrorCancelled)
@@ -674,12 +809,32 @@ struct WebBrowserComponent::Impl::Platform
     class WebViewImpl;
 };
 
+// SineDAW patch (R6b): window.__JUCE__.postMessageWithFiles (message, files), the WKWebView's
+// counterpart of WebView2's chrome.webview.postMessageWithAdditionalObjects for files a page took
+// in a drop: it posts the message (the JSON an emitted event posts) with the files' names to the
+// __JUCE_FILES__ handler, which adds the dropped files' paths as payload.sdFiles (see
+// WebViewDelegateClass). Defined only where that handler is registered (native integrations, macOS).
+// This script runs first (WKWebViewImpl inserts it at index 0) and JUCE's later scripts only add
+// to window.__JUCE__, so the function stays.
 static constexpr const char* platformSpecificIntegrationScript = R"(
 window.__JUCE__ = {
   postMessage: function (object) {
     window.webkit.messageHandlers.__JUCE__.postMessage(object);
   },
 };
+
+if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.__JUCE_FILES__) {
+  window.__JUCE__.postMessageWithFiles = function (message, files) {
+    var names = [];
+
+    for (var i = 0; files && i < files.length; ++i)
+      names.push(String(files[i].name));
+
+    window.webkit.messageHandlers.__JUCE_FILES__.postMessage(
+      JSON.stringify({ message: message, names: names })
+    );
+  };
+}
 )";
 
 //==============================================================================
@@ -857,6 +1012,12 @@ public:
         {
             [[config.get() userContentController] addScriptMessageHandler:webViewDelegate.get()
                                                                      name:@"__JUCE__"];
+
+           #if JUCE_MAC
+            // SineDAW patch (R6b): the files a page hands over with window.__JUCE__.postMessageWithFiles
+            [[config.get() userContentController] addScriptMessageHandler:webViewDelegate.get()
+                                                                     name:@"__JUCE_FILES__"];
+           #endif
         }
 
         // It isn't necessary to concatenate all scripts and add them as one. They will still work
@@ -901,6 +1062,9 @@ public:
                                                       configuration: config.get()]);
 
         setLastFocusChangeHandle (webView.get(), &lastFocusChange);
+
+        // SineDAW patch (R6b): where the view keeps the paths of the files dropped on it
+        setDropPathsHandle (webView.get(), &dropPaths);
        #else
         webView.reset ([[WKWebView alloc] initWithFrame: CGRectMake (0, 0, 100.0f, 100.0f)
                                           configuration: config.get()]);
@@ -919,6 +1083,11 @@ public:
     ~WKWebViewImpl() override
     {
         WebViewDelegateClass::setConnector (webViewDelegate.get(), nullptr);
+
+       #if JUCE_MAC
+        // SineDAW patch (R6b): the view may outlive this; its drops must not reach dropPaths then
+        setDropPathsHandle (webView.get(), nullptr);
+       #endif
 
         setView (nil);
         [webView.get() setNavigationDelegate: nil];
@@ -1151,6 +1320,9 @@ private:
     DelegateConnector delegateConnector;
     bool allowAccessToEnclosingDirectory = false;
     LastFocusChange lastFocusChange;
+   #if JUCE_MAC
+    StringArray dropPaths; // SineDAW patch (R6b): the paths of the files last dropped on webView
+   #endif
     ObjCObjectHandle<WKWebView*> webView;
     ObjCObjectHandle<id> webViewDelegate;
     String lastRequestedUrl, lastLoadedUrl;
